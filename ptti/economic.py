@@ -1,6 +1,4 @@
-import yaml
 import numpy as np
-from math import ceil, exp
 from scipy.interpolate import interp1d
 from ptti.economic_data import econ_inputs
 
@@ -49,7 +47,7 @@ def calcArgumentsODE(traj, paramtraj, cfg):
     for c in ('SU', 'SD', 'EU', 'ED', 'IU', 'ID', 'RU', 'RD'):
         i = model.colindex(c)
         cpm[c] = interp1d(time, traj[:, i], kind='nearest')(days)
-    for p in ('theta', 'c', 'eta', 'gamma', 'chi', 'testedBase'):
+    for p in ('theta', 'c', 'eta', 'gamma', 'chi', 'testedBase', 'theta_U'):
         traj = paramtraj.get(p)
         if traj is not None:
             par[p] = interp1d(time, traj, kind='nearest')(days)
@@ -63,7 +61,7 @@ def calcArgumentsODE(traj, paramtraj, cfg):
     # Now derive the relevant quantities
     args = {'time': days}
     args['contacts'] = par['c']
-    args['tested'] = cpm['IU']*par['theta'] + (cpm['SU']+cpm['EU']+cpm['RU'])*par['testedBase']
+    args['tested'] = cpm['IU']*par['theta'] + (cpm['SU']+cpm['EU']+cpm['RU'])*(par['testedBase'] + par['theta_U'])
     # traced are: the number of contacts of infectives that have been tested - IF tracing is done, i.e. if chi > 0.
     args['traced'] = cpm['IU']*par['theta']*par['c']*avg_inftime * (par['chi'] > 0)
     args['recovered'] = cpm['RU']+cpm['RD']
@@ -126,7 +124,7 @@ def calcEconOutputs(time, contacts, infected, recovered, tested, traced, isolate
     output['Tracing']['Tracing_Block_Lengths'] = [tb[1] for tb in tracing_blocks]
     output['Tracing']['Tracers'] = [tb[2] for tb in tracing_blocks]
     output['Tracing']['Max_Tracers'] = max_tracers
-    output['Tracing']['Max_Supervisors'] = max_supervisors    
+    output['Tracing']['Max_Supervisors'] = max_supervisors
     output['Tracing']['Tracing_Costs'] = tracing_costs
     output['Tracing']['Tracing_Total_Costs'] = sum(tracing_costs)
 
@@ -168,11 +166,14 @@ def calcEconOutputs(time, contacts, infected, recovered, tested, traced, isolate
     output['Testing']['Testing_Total_Costs'] = sum(testing_costs)
 
     # Deaths and other outcomes
-    deaths = recovered[-1]*econ_inputs['Medical']['IFR']
-    icu = recovered[-1]*econ_inputs['Medical']['ICU_Fraction']
-    hospital = recovered[-1]*econ_inputs['Medical']['Hospitalised_Fraction'] - recovered[-1]*econ_inputs['Medical']['ICU_Fraction']  # Hospital non-ICU
-    cases = recovered[-1] - deaths - hospital - icu
-    nhs_costs = recovered[-1]*econ_inputs['Medical']['Total_NHS_Cost_Per_Recovered']
+    total_recovered = recovered[-1]
+    daily_recovered = np.diff(recovered, prepend=0) # Since cumulative sum
+    deaths = total_recovered*econ_inputs['Medical']['IFR']
+    icu = total_recovered*econ_inputs['Medical']['ICU_Fraction']
+    hospital = total_recovered*econ_inputs['Medical']['Hospitalised_Fraction'] - recovered[-1]*econ_inputs['Medical']['ICU_Fraction']  # Hospital non-ICU
+    cases = total_recovered - deaths - hospital - icu
+    nhs_costs = total_recovered*econ_inputs['Medical']['Total_NHS_Cost_Per_Recovered']
+    daily_nhs_costs = daily_recovered*econ_inputs['Medical']['Total_NHS_Cost_Per_Recovered']
     #prod_costs = recovered[-1]*econ_inputs['Medical']['Total_Productivity_Loss_Per_Recovered']
 
     output['Medical'] = {}
@@ -185,7 +186,6 @@ def calcEconOutputs(time, contacts, infected, recovered, tested, traced, isolate
     # Economy minimum is: econ_inputs['Shutdown']['UK_Shutdown_GDP_Penalty'], with econ_inputs['Shutdown']['UK_Shutdown_Contacts']
     # Full strength is 0 penalty at econ_inputs['Shutdown']['UK_Open_Contacts']
     Daily_GDP = []
-    Economy_Fraction_Daily = []
     Daily_GDP_Base = econ_inputs['Shutdown']['UK_GDP_Monthly'] / 30
     Isolated_Fraction = isolated / population # Each person in isolation is a fraction of the economy fully closed.
     # print(Isolated_Fraction)
@@ -205,6 +205,28 @@ def calcEconOutputs(time, contacts, infected, recovered, tested, traced, isolate
     output['Economic']['Contacts'] = contacts
     output['Economic']['Isolated'] = isolated
     output['Economic']['Total_Productivity_Loss'] = (No_Pandemic_GDP-total_GDP)
+
+    # Compute daily costs
+    output['Daily'] = {}
+
+    output['Daily']['Tracing'] = []
+    for block in range(len(output['Tracing']['Tracing_Block_Lengths'])):
+        block_length = output['Tracing']['Tracing_Block_Lengths'][block]
+        block_cost =  output['Tracing']['Tracing_Costs'][block]
+        daily_cost = block_cost/block_length
+        output['Daily']['Tracing'].extend([daily_cost]*block_length)
+
+    output['Daily']['Testing'] = []
+    for block in range(len(output['Testing']['Testing_Block_Lengths'])):
+        block_length = output['Testing']['Testing_Block_Lengths'][block]
+        block_cost =  output['Testing']['Testing_Costs'][block]
+        daily_cost = block_cost/block_length
+        output['Daily']['Testing'].extend([daily_cost]*block_length)
+
+    output['Daily']['Tracing'] = np.array(output['Daily']['Tracing'])
+    output['Daily']['Testing'] = np.array(output['Daily']['Testing'])
+    output['Daily']['NHS'] = daily_nhs_costs
+    output['Daily']['Productivity_Loss'] = Daily_GDP_Base - Daily_GDP
 
     return output
 
@@ -457,10 +479,8 @@ def calcEconOutputsOld(time, trajectory, parameters, scenario):
 
     Total_Required_Tests = np.trapz(Daily_tests, time)
 
-    Testing_Costs_TimeSeries += Total_Required_Tests * \
-        econ_inputs['Test']['Cost_Per_PCR_Test']/len(time)
-    Testing_Costs += Total_Required_Tests * \
-        econ_inputs['Test']['Cost_Per_PCR_Test']
+    Testing_Costs_TimeSeries += Total_Required_Tests * econ_inputs['Test']['Cost_Per_PCR_Test']/len(time)
+    Testing_Costs += Total_Required_Tests * econ_inputs['Test']['Cost_Per_PCR_Test']
 
     # Now do the sum over periods
     Testing_Costs_Per_Period = []
