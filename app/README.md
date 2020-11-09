@@ -22,3 +22,7 @@ streamlit run ptti_app.py
 and a new browser window with the app should launch.
 
 [Streamlit]: https://www.streamlit.io/
+
+## Troubleshooting
+
+- On Ubuntu, `streamlit` may fail with `Illegal instruction (core dumped)`. This can happen if the `pyarrow` module was not compiled correctly. A possible fix is `pip uninstall pyarrow` followed by `conda install pyarrow`
